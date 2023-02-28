@@ -1,0 +1,64 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/harsha2892/promotion_model.git
+    targetRevision: main
+    path: kubernetes
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: myapp-dev
+  syncPolicy:
+    automated:
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
+  # Set up a webhook to trigger the build when a change is made in GitHub
+  webhooks:
+    - type: github
+      name: myapp-github-webhook
+      endpoint: https://argocd-webhook-github.example.com/
+      github:
+        secret: mysecret
+        events:
+          - push
+          - pull_request
+  # Set up a post-sync hook to create a PR for promotion to the next environment
+  # if the deployment was successful, and trigger the build in the promoted environment
+  # after promotion
+  sync:
+    hooks:
+      - name: create-promotion-pr
+        when: SyncStatus == "Synced" && ResourceName == "myapp"
+        timeout: 60s
+        container:
+          image: alpine/git
+          command: [sh, -c]
+          args:
+            - |
+              cd kubernetes
+              git config --global user.email "argocd@example.com"
+              git config --global user.name "Argo CD"
+              git checkout main
+              git merge origin/main --no-edit
+              git push origin main
+              git checkout -b promotion-to-staging
+              git merge main --no-edit
+              git push origin promotion-to-staging
+              hub pull-request -m "Promote myapp to staging" -h promotion-to-staging -b main
+              # Trigger the build in the promoted environment
+              cd ..
+              git clone https://github.com/myorg/myapp.git
+              cd myapp
+              git fetch origin
+              git checkout promotion-to-staging
+              git merge origin/promotion-to-staging --no-edit
+              git push origin promotion-to-staging
+        retries: 3
+        backoff:
+          duration: 10s
+          factor: 2
+          maxDuration: 2m
